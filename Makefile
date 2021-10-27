@@ -1,5 +1,5 @@
 CC = gcc
-SRC = main.c time_diff.c
+SRC = main.c time_diff.c matrix.c
 
 .PHONY: clean
 

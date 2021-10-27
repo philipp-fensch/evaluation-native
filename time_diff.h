@@ -14,8 +14,12 @@ void TimeDiff_start(TimeDiff *t);
 void TimeDiff_stop(TimeDiff *t);
 
 // Retrieve difference
-long TimeDiff_usec(TimeDiff *t);
+double TimeDiff_usec(TimeDiff *t);
 double TimeDiff_msec(TimeDiff *t);
 double TimeDiff_sec(TimeDiff *t);
+
+double average_usec(TimeDiff *diffs, const int COUNT);
+double average_msec(TimeDiff *diffs, const int COUNT); 
+double average_sec(TimeDiff *diffs, const int COUNT); 
 
 #endif // TIMEDIFF_H

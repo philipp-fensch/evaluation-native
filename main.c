@@ -5,6 +5,13 @@
 #include <stdio.h>
 
 #include "time_diff.h"
+#include "matrix.h"
+
+#define DIM 5000
+#define ITERATIONS 10
+
+cublasHandle_t handle;
+cusolverDnHandle_t cusolver_handle;
 
 void memcpyTest() {
     const size_t N_BYTES = 2 << 29; // 512 MiB
@@ -12,19 +19,18 @@ void memcpyTest() {
     void *memory_host = malloc(N_BYTES);
     void *memory_dev = NULL;
     cudaError_t error;
-    TimeDiff diff;
+    TimeDiff diff[ITERATIONS];
 
 
-    TimeDiff_start(&diff);
     error = cudaMalloc(&memory_dev, N_BYTES);
-    cudaDeviceSynchronize();
-    TimeDiff_stop(&diff);
-    printf("cudaMalloc: %fms\n", TimeDiff_msec(&diff));
 
-    TimeDiff_start(&diff);
-    error = cudaMemcpy(memory_dev, memory_host, N_BYTES, cudaMemcpyHostToDevice);
-    TimeDiff_stop(&diff);
-    printf("cudaMemcpy: %fms\n", TimeDiff_msec(&diff));
+    for(int i = 0; i < ITERATIONS; i++) {
+        TimeDiff_start(&diff[i]);
+        error = cudaMemcpy(memory_dev, memory_host, N_BYTES, cudaMemcpyHostToDevice);
+        TimeDiff_stop(&diff[i]);
+        printf("cudaMemcpy: %.2fms\n", TimeDiff_msec(&diff[i]));
+    }
+    printf("cudaMemcpy Average: %.2fms\n\n", average_msec(diff, ITERATIONS));
 
     cudaFree(memory_dev);
     free(memory_host);
@@ -33,39 +39,30 @@ void memcpyTest() {
 void latencyTest() {
     cudaError_t error;
     int count;
-    TimeDiff diff;
+    TimeDiff diff[ITERATIONS];
 
-    TimeDiff_start(&diff);
-    error = cudaGetDeviceCount(&count);
-    TimeDiff_stop(&diff);
-    printf("cudaGetDeviceCount: %ldµs\n", TimeDiff_usec(&diff));
+    cudaDeviceSynchronize();
+    for(int i = 0; i < ITERATIONS; i++) {
+        TimeDiff_start(&diff[i]);
+        error = cudaGetDeviceCount(&count);
+        TimeDiff_stop(&diff[i]);
+        printf("cudaGetDeviceCount: %.2fµs\n", TimeDiff_usec(&diff[i]));
+    }
+    printf("cudaGetDeviceCount Average: %.2fµs\n\n", average_usec(diff, ITERATIONS));
 }
 
 void linearSolverTest() {
-    const int DIM = 3;
-    
-    double matrix_host[] = {
-        2.0, 2.0, 0.0,
-        0.0, 2.0, 0.0,
-        0.0, 1.0, 1.0
-    };
+    double *right_side_host = read_vector_from_file(DIM, "vector.txt");
+    double *matrix_host = read_matrix_from_file(DIM, "matrix.txt");
+    double *solution = malloc(DIM * sizeof(double));
 
-    double right_side_host[] = {
-        2.0,
-        4.0,
-        5.0
-    };
-
-    cusolverDnHandle_t cusolver_handle;
-    cusolverDnCreate(&cusolver_handle);
-
-    TimeDiff diff;
-    TimeDiff_start(&diff);
+    TimeDiff diff[ITERATIONS];
 
     double *matrix_device;
     double *right_side_device;
     int *pivoting_sequence_device;
     int *info_device;
+
     cudaMalloc((void**)&matrix_device, sizeof(double) * DIM * DIM);
     cudaMalloc((void**)&right_side_device, sizeof(double) * DIM);
     cudaMalloc((void**)&pivoting_sequence_device, sizeof(int) * DIM);
@@ -79,33 +76,42 @@ void linearSolverTest() {
     cusolverDnDgetrf_bufferSize(cusolver_handle, DIM, DIM, matrix_device, DIM, &workspace_size);
     cudaMalloc((void**)&workspace_device, sizeof(double) * workspace_size);
 
+    // LU
     cusolverDnDgetrf(cusolver_handle, DIM, DIM, matrix_device, DIM, workspace_device, pivoting_sequence_device, info_device);
     cudaDeviceSynchronize();
 
-    cusolverDnDgetrs(cusolver_handle, CUBLAS_OP_T, DIM, 1, matrix_device, DIM, pivoting_sequence_device, right_side_device, DIM, info_device);
-    cudaDeviceSynchronize();
+    // Solve
+    for(int i = 0; i < ITERATIONS; i++) {
+        // Copy right side to device
+        cudaMemcpy(right_side_device, right_side_host, sizeof(double) * DIM, cudaMemcpyHostToDevice);
 
-    cudaMemcpy(right_side_host, right_side_device, DIM, cudaMemcpyDeviceToHost);
-    
-    TimeDiff_stop(&diff);
-    printf("linear solver: %fms\n", TimeDiff_msec(&diff));
+        //
+        TimeDiff_start(&diff[i]);
+        cusolverDnDgetrs(cusolver_handle, CUBLAS_OP_T, DIM, 1, matrix_device, DIM, pivoting_sequence_device, right_side_device, DIM, info_device);
+        cudaDeviceSynchronize();
+        TimeDiff_stop(&diff[i]);
+        printf("linear solver: %.2fms\n", TimeDiff_msec(&diff[i]));
+    }
+
+    printf("linear solver Average: %.2fms\n\n", average_msec(diff, ITERATIONS));
+
+    cudaMemcpy(solution, right_side_device, DIM * sizeof(double), cudaMemcpyDeviceToHost);
+
+    cudaFree(matrix_device);
+    cudaFree(right_side_device);
+    cudaFree(pivoting_sequence_device);
+    cudaFree(info_device);
+
+    free(matrix_host);
+    free(right_side_host);
+    free(solution);
 }
 
 void matMulTest() {
-    const int DIM = 3;
+    double *matrix_host = read_matrix_from_file(DIM, "matrix.txt");
+    double *solution = malloc(DIM * DIM * sizeof(double));
 
-    double matrix_host[] = {
-        2.0, 2.0, 0.0,
-        0.0, 2.0, 0.0,
-        0.0, 1.0, 1.0
-    };
-
-    TimeDiff diff;
-
-    cublasHandle_t handle;
-    cublasCreate(&handle);
-
-    TimeDiff_start(&diff);
+    TimeDiff diff[ITERATIONS];
     double *device_matrix_A, *device_matrix_B, *d_C;
     cudaMalloc((void**)&device_matrix_A, DIM * DIM * sizeof(double));
     cudaMalloc((void**)&device_matrix_B, DIM * DIM * sizeof(double));
@@ -114,24 +120,47 @@ void matMulTest() {
 
     const double alpha = 1;
     const double beta = 0;
-    cublasStatus_t status = cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, DIM, DIM, DIM, &alpha,
-    device_matrix_A, DIM,
-    device_matrix_A, DIM, &beta,
-    device_matrix_B, DIM);
 
-    cudaMemcpy(matrix_host, device_matrix_B, DIM * DIM * sizeof(double), cudaMemcpyDeviceToHost);
+    // "Warming up"
+    cublasStatus_t status = cublasDgemm(
+            handle, CUBLAS_OP_N, CUBLAS_OP_N, DIM, DIM, DIM, &alpha,
+            device_matrix_A, DIM,
+            device_matrix_A, DIM, &beta,
+            device_matrix_B, DIM);
+    cudaDeviceSynchronize();
+
+    // bench
+    for(int i = 0; i < ITERATIONS; i++) {
+        TimeDiff_start(&diff[i]);
+        cublasStatus_t status = cublasDgemm(
+            handle, CUBLAS_OP_N, CUBLAS_OP_N, DIM, DIM, DIM, &alpha,
+            device_matrix_A, DIM,
+            device_matrix_A, DIM, &beta,
+            device_matrix_B, DIM);
+        cudaDeviceSynchronize();
+        TimeDiff_stop(&diff[i]);
+        printf("Matmul: %.2fms\n", TimeDiff_msec(&diff[i]));
+    }
+
+    printf("Matmul Average: %.2fms\n\n", average_msec(diff, ITERATIONS));
+
+    cudaMemcpy(solution, device_matrix_B, DIM * DIM * sizeof(double), cudaMemcpyDeviceToHost);
 
     cudaFree(device_matrix_A);
     cudaFree(device_matrix_B);
-
-    TimeDiff_stop(&diff);
-    printf("Matmul: %fµs\n", TimeDiff_usec(&diff));
 }
 
 int main() {
+    // Init
+    cublasCreate(&handle);
+    cusolverDnCreate(&cusolver_handle);
+
     memcpyTest();
     latencyTest();
     linearSolverTest();
     matMulTest();
+
+    cusolverDnDestroy(cusolver_handle);
+    cublasDestroy(handle);
     return 0;
 }
